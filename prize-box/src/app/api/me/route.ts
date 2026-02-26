@@ -1,31 +1,28 @@
 import { NextResponse } from "next/server";
-import { readSessionToken } from "@/lib/session";
-import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { readSessionToken, sessionCookieName } from "../../lib/session";
+
+export const runtime = "nodejs";
 
 export async function GET(req: Request) {
   try {
-    const cookie = req.headers.get("cookie") || "";
-    const match = cookie.match(/pb_session=([^;]+)/);
+    const cookieHeader = req.headers.get("cookie") ?? "";
+    const cookies = Object.fromEntries(
+      cookieHeader
+        .split(";")
+        .map(v => v.trim())
+        .filter(Boolean)
+        .map(v => {
+          const idx = v.indexOf("=");
+          if (idx === -1) return [v, ""];
+          return [v.slice(0, idx), decodeURIComponent(v.slice(idx + 1))];
+        })
+    );
 
-    if (!match) {
-      return NextResponse.json({ user: null }, { status: 200 });
-    }
-
-    const token = decodeURIComponent(match[1]);
+    const token = cookies[sessionCookieName()] ?? null;
     const session = await readSessionToken(token);
 
-    const { data: profile, error } = await supabaseAdmin
-      .from("profiles")
-      .select("id, tg_id, username, first_name, last_name, photo_url, role, created_at")
-      .eq("id", session.uid)
-      .single();
-
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
-    }
-
-    return NextResponse.json({ user: profile }, { status: 200 });
-  } catch {
-    return NextResponse.json({ user: null }, { status: 200 });
+    return NextResponse.json({ ok: true, session });
+  } catch (e: any) {
+    return NextResponse.json({ ok: false, error: e?.message ?? "Unknown error" }, { status: 500 });
   }
 }

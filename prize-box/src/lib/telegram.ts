@@ -1,60 +1,77 @@
 import crypto from "crypto";
 
-function parseInitData(initData: string) {
+export type TelegramUser = {
+  id?: number;
+  first_name?: string;
+  last_name?: string;
+  username?: string;
+  language_code?: string;
+  photo_url?: string;
+};
+
+function parseInitData(initData: string): Record<string, string> {
   const params = new URLSearchParams(initData);
-  const obj: Record<string, string> = {};
-  params.forEach((v, k) => (obj[k] = v));
-  return obj;
+  const out: Record<string, string> = {};
+  for (const [k, v] of params.entries()) out[k] = v;
+  return out;
 }
 
-export function verifyTelegramInitData(initData: string, botToken: string) {
-  const data = parseInitData(initData);
-
-  const hash = data.hash;
-  if (!hash) return { ok: false as const, reason: "NO_HASH" };
-
+function buildDataCheckString(data: Record<string, string>): string {
   const pairs: string[] = [];
-  Object.keys(data)
-    .filter((k) => k !== "hash")
-    .sort()
-    .forEach((k) => pairs.push(`${k}=${data[k]}`));
+  for (const [k, v] of Object.entries(data)) {
+    if (k === "hash") continue;
+    pairs.push(`${k}=${v}`);
+  }
+  pairs.sort((a, b) => a.localeCompare(b));
+  return pairs.join("\n");
+}
 
-  const dataCheckString = pairs.join("\n");
+/**
+ * Telegram WebApp initData verification.
+ * Needs TELEGRAM_BOT_TOKEN in env.
+ */
+export function verifyTelegramWebAppInitData(initData: string): boolean {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  if (!botToken) return false;
 
+  const data = parseInitData(initData);
+  const hash = data.hash;
+  if (!hash) return false;
+
+  const dataCheckString = buildDataCheckString(data);
+
+  // secret_key = HMAC_SHA256("WebAppData", bot_token)
   const secretKey = crypto
     .createHmac("sha256", "WebAppData")
     .update(botToken)
     .digest();
 
+  // computed_hash = HMAC_SHA256(data_check_string, secret_key)
   const computedHash = crypto
     .createHmac("sha256", secretKey)
     .update(dataCheckString)
     .digest("hex");
 
-  const ok = computedHash === hash;
-
-  if (!ok) return { ok: false as const, reason: "BAD_HASH" };
-
-  return { ok: true as const, data };
+  // timing-safe compare
+  try {
+    return crypto.timingSafeEqual(
+      Buffer.from(computedHash, "hex"),
+      Buffer.from(hash, "hex")
+    );
+  } catch {
+    return false;
+  }
 }
 
-export function extractTelegramUser(initData: string) {
-  const params = new URLSearchParams(initData);
-  const userRaw = params.get("user");
-
-  if (!userRaw) return null;
+export function extractTelegramUserFromInitData(initData: string): TelegramUser {
+  const data = parseInitData(initData);
+  const userRaw = data.user;
+  if (!userRaw) return {};
 
   try {
-    const u = JSON.parse(userRaw);
-
-    return {
-      tg_id: Number(u.id),
-      username: u.username ?? null,
-      first_name: u.first_name ?? null,
-      last_name: u.last_name ?? null,
-      photo_url: u.photo_url ?? null,
-    };
+    const user = JSON.parse(userRaw) as TelegramUser;
+    return user ?? {};
   } catch {
-    return null;
+    return {};
   }
 }
