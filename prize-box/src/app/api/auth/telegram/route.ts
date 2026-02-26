@@ -1,102 +1,105 @@
+// src/app/api/auth/telegram/route.ts
 import { NextResponse } from "next/server";
-import { verifyTelegramInitData, extractTelegramUser } from "@/lib/telegram";
-import { supabaseAdmin } from "@/lib/supabaseAdmin";
-import { createSessionToken } from "@/lib/session";
+import crypto from "crypto";
+
+export const runtime = "nodejs";
+
+type Body = { initData?: string };
+
+function parseInitData(initData: string) {
+  const params = new URLSearchParams(initData);
+  const hash = params.get("hash") || "";
+  params.delete("hash");
+
+  // data_check_string — пары key=value, отсортированные по key, через \n
+  const pairs: string[] = [];
+  Array.from(params.keys())
+    .sort()
+    .forEach((key) => {
+      const value = params.get(key);
+      if (value !== null) pairs.push(`${key}=${value}`);
+    });
+
+  const dataCheckString = pairs.join("\n");
+  return { params, hash, dataCheckString };
+}
+
+function verifyTelegramWebAppInitData(initData: string) {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  if (!botToken) {
+    throw new Error("TELEGRAM_BOT_TOKEN is not set");
+  }
+
+  const { hash, dataCheckString } = parseInitData(initData);
+  if (!hash) return false;
+
+  // secret_key = HMAC_SHA256("WebAppData", bot_token)
+  const secretKey = crypto
+    .createHmac("sha256", "WebAppData")
+    .update(botToken)
+    .digest();
+
+  // computed_hash = HMAC_SHA256(secret_key, data_check_string)
+  const computed = crypto
+    .createHmac("sha256", secretKey)
+    .update(dataCheckString)
+    .digest("hex");
+
+  // сравнение без утечек по времени
+  try {
+    return crypto.timingSafeEqual(
+      Buffer.from(computed, "hex"),
+      Buffer.from(hash, "hex")
+    );
+  } catch {
+    return false;
+  }
+}
+
+function extractTelegramUserFromInitData(initData: string) {
+  const params = new URLSearchParams(initData);
+  const userRaw = params.get("user");
+  if (!userRaw) return null;
+
+  try {
+    return JSON.parse(userRaw);
+  } catch {
+    return null;
+  }
+}
 
 export async function POST(req: Request) {
   try {
-    const body = await req.json().catch(() => ({}));
-    const initData = body?.initData;
+    const body = (await req.json().catch(() => ({}))) as Body;
+    const initData = body?.initData?.trim();
 
-    if (!initData || typeof initData !== "string") {
-      return NextResponse.json({ error: "initData is required" }, { status: 400 });
-    }
-
-    const botToken = process.env.TELEGRAM_BOT_TOKEN;
-    if (!botToken) {
-      return NextResponse.json({ error: "TELEGRAM_BOT_TOKEN is missing" }, { status: 500 });
-    }
-
-    const verified = verifyTelegramInitData(initData, botToken);
-    if (!verified.ok) {
+    if (!initData) {
       return NextResponse.json(
-        { error: "Telegram initData invalid", reason: verified.reason },
+        { ok: false, error: "initData is required" },
+        { status: 400 }
+      );
+    }
+
+    const isValid = verifyTelegramWebAppInitData(initData);
+    if (!isValid) {
+      return NextResponse.json(
+        { ok: false, error: "Invalid Telegram initData" },
         { status: 401 }
       );
     }
 
-    const tgUser = extractTelegramUser(initData);
-    if (!tgUser) {
-      return NextResponse.json({ error: "No user in initData" }, { status: 400 });
+    const tgUser = extractTelegramUserFromInitData(initData);
+    if (!tgUser?.id) {
+      return NextResponse.json(
+        { ok: false, error: "Telegram user not found in initData" },
+        { status: 400 }
+      );
     }
 
-    // find existing profile
-    const { data: existing, error: findErr } = await supabaseAdmin
-      .from("profiles")
-      .select("id, role")
-      .eq("tg_id", tgUser.tg_id)
-      .maybeSingle();
-
-    if (findErr) {
-      return NextResponse.json({ error: findErr.message }, { status: 500 });
-    }
-
-    let profileId = existing?.id as string | undefined;
-    let role = existing?.role ?? "user";
-
-    if (!profileId) {
-      const { data: created, error: insErr } = await supabaseAdmin
-        .from("profiles")
-        .insert({
-          tg_id: tgUser.tg_id,
-          username: tgUser.username,
-          first_name: tgUser.first_name,
-          last_name: tgUser.last_name,
-          photo_url: tgUser.photo_url,
-          role: "user",
-        })
-        .select("id, role")
-        .single();
-
-      if (insErr) {
-        return NextResponse.json({ error: insErr.message }, { status: 500 });
-      }
-
-      profileId = created.id;
-      role = created.role;
-    } else {
-      // update public fields (never role)
-      await supabaseAdmin
-        .from("profiles")
-        .update({
-          username: tgUser.username,
-          first_name: tgUser.first_name,
-          last_name: tgUser.last_name,
-          photo_url: tgUser.photo_url,
-        })
-        .eq("id", profileId);
-    }
-
-    const token = await createSessionToken({
-      uid: profileId!,
-      tg_id: tgUser.tg_id,
-      role: role ?? "user",
-    });
-
-    const res = NextResponse.json({ ok: true });
-
-    res.cookies.set("pb_session", token, {
-      httpOnly: true,
-      secure: false, // локально false; на проде сделаем true
-      sameSite: "lax",
-      path: "/",
-      maxAge: 60 * 60 * 24 * 30,
-    });
-
-    return res;
+    return NextResponse.json({ ok: true, user: tgUser });
   } catch (e: any) {
     return NextResponse.json(
-      { error: e?.message ?? "Unknown error" },
+      { ok: false, error: e?.message ?? "Unknown error" },
       { status: 500 }
     );
   }
