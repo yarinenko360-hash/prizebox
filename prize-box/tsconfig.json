@@ -1,36 +1,144 @@
-{
-  "compilerOptions": {
-    "target": "ES2017",
-    "lib": ["dom", "dom.iterable", "esnext"],
-    "allowJs": true,
-    "skipLibCheck": true,
-    "strict": true,
-    "noEmit": true,
-    "esModuleInterop": true,
-    "module": "esnext",
-    "moduleResolution": "bundler",
-    "resolveJsonModule": true,
-    "isolatedModules": true,
-    "jsx": "react-jsx",
-    "incremental": true,
-    "plugins": [
-      {
-        "name": "next"
-      }
-    ],
+import { NextResponse } from "next/server";
+import crypto from "crypto";
 
-    "baseUrl": ".",
-    "paths": {
-      "@/*": ["./src/*"]
+// ВАЖНО: только относительные импорты (Netlify не любит алиасы, если где-то не совпало)
+import { supabaseAdmin } from "../../../../../lib/supabaseAdmin";
+import { createSessionToken } from "../../../../../lib/session";
+
+/**
+ * Telegram WebApp initData verify (HMAC-SHA256)
+ * ref: https://core.telegram.org/bots/webapps#validating-data-received-via-the-web-app
+ */
+function verifyTelegramWebAppInitData(initData: string, botToken: string) {
+  const params = new URLSearchParams(initData);
+  const hash = params.get("hash");
+  if (!hash) return false;
+
+  // собираем data_check_string: key=value по алфавиту, без hash
+  const pairs: string[] = [];
+  params.forEach((value, key) => {
+    if (key === "hash") return;
+    pairs.push(`${key}=${value}`);
+  });
+  pairs.sort();
+  const dataCheckString = pairs.join("\n");
+
+  // secret_key = sha256(bot_token)
+  const secretKey = crypto.createHash("sha256").update(botToken).digest();
+
+  // check_hash = hmac_sha256(secret_key, data_check_string) hex
+  const checkHash = crypto
+    .createHmac("sha256", secretKey)
+    .update(dataCheckString)
+    .digest("hex");
+
+  // сравнение безопаснее через timingSafeEqual
+  try {
+    return crypto.timingSafeEqual(
+      Buffer.from(checkHash, "hex"),
+      Buffer.from(hash, "hex")
+    );
+  } catch {
+    return false;
+  }
+}
+
+function extractTelegramUserFromInitData(initData: string) {
+  const params = new URLSearchParams(initData);
+  const userStr = params.get("user");
+  if (!userStr) return null;
+
+  try {
+    return JSON.parse(userStr);
+  } catch {
+    return null;
+  }
+}
+
+export async function POST(req: Request) {
+  try {
+    const body = await req.json().catch(() => null);
+    const initData = body?.initData;
+
+    if (!initData || typeof initData !== "string") {
+      return NextResponse.json(
+        { ok: false, error: "initData is required" },
+        { status: 400 }
+      );
     }
-  },
 
-  "include": [
-    "next-env.d.ts",
-    "**/*.ts",
-    "**/*.tsx",
-    ".next/types/**/*.ts"
-  ],
+    const botToken = process.env.TELEGRAM_BOT_TOKEN;
+    if (!botToken) {
+      return NextResponse.json(
+        { ok: false, error: "TELEGRAM_BOT_TOKEN is missing on server" },
+        { status: 500 }
+      );
+    }
 
-  "exclude": ["node_modules"]
+    const isValid = verifyTelegramWebAppInitData(initData, botToken);
+    if (!isValid) {
+      return NextResponse.json(
+        { ok: false, error: "Invalid Telegram initData" },
+        { status: 401 }
+      );
+    }
+
+    const tgUser: any = extractTelegramUserFromInitData(initData);
+    if (!tgUser?.id) {
+      return NextResponse.json(
+        { ok: false, error: "Telegram user not found in initData" },
+        { status: 400 }
+      );
+    }
+
+    // Пытаемся сохранить/обновить профиль в Supabase (если таблица profiles есть)
+    let profile: any = null;
+    try {
+      const upsertRes = await supabaseAdmin
+        .from("profiles")
+        .upsert(
+          {
+            telegram_id: String(tgUser.id),
+            username: tgUser.username ?? null,
+            first_name: tgUser.first_name ?? null,
+            last_name: tgUser.last_name ?? null,
+            photo_url: tgUser.photo_url ?? null,
+            // если у тебя роль иначе называется — поправишь
+            role: "admin",
+          },
+          { onConflict: "telegram_id" }
+        )
+        .select("*")
+        .single();
+
+      if (!upsertRes.error) profile = upsertRes.data;
+    } catch {
+      // если таблицы/полей нет — просто пропускаем
+      profile = null;
+    }
+
+    // Сессия/токен (если lib/session у тебя уже настроен)
+    let token: any = null;
+    try {
+      token = await createSessionToken({
+        profileId: profile?.id ?? null,
+        role: profile?.role ?? "admin",
+        telegramId: String(tgUser.id),
+      } as any);
+    } catch {
+      token = null;
+    }
+
+    return NextResponse.json({
+      ok: true,
+      user: tgUser,
+      profile,
+      token,
+    });
+  } catch (e: any) {
+    return NextResponse.json(
+      { ok: false, error: e?.message ?? "Unknown error" },
+      { status: 500 }
+    );
+  }
 }
