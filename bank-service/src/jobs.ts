@@ -1,4 +1,4 @@
-import { TelegramClient } from "gramjs";
+import { TelegramClient } from "telegram";
 import { supabaseAdmin } from "./supabase.js";
 import { transferGiftBySlug } from "./tg.js";
 
