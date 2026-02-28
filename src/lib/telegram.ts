@@ -10,16 +10,19 @@ export type TelegramUser = {
 };
 
 function timingSafeEqualStr(a: string, b: string) {
-  const ab = Buffer.from(a);
-  const bb = Buffer.from(b);
+  const ab = Buffer.from(a, "utf8");
+  const bb = Buffer.from(b, "utf8");
   if (ab.length !== bb.length) return false;
   return crypto.timingSafeEqual(ab, bb);
 }
 
 /**
- * ✅ Telegram WebApp initData verification (официальная схема)
- * secret_key = HMAC_SHA256(key=botToken, message="WebAppData")
- * check_hash = HMAC_SHA256(key=secret_key, message=data_check_string)
+ * ✅ Telegram WebApp initData verification (правильная схема)
+ *
+ * data_check_string = key=value pairs (без hash), отсортированы по key, разделитель '\n'
+ *
+ * secret_key = HMAC_SHA256(key="WebAppData", message=botToken)
+ * check_hash = HMAC_SHA256(key=secret_key, message=data_check_string) -> hex
  */
 export function verifyTelegramInitData(
   initData: string,
@@ -30,14 +33,15 @@ export function verifyTelegramInitData(
   try {
     if (!initData) return { ok: false, reason: "No initData" };
 
+    const token = (botToken ?? "").trim();
+    if (!token) return { ok: false, reason: "No botToken" };
+
     const params = new URLSearchParams(initData);
     const hash = params.get("hash");
     if (!hash) return { ok: false, reason: "No hash in initData" };
 
-    // hash исключаем из строки проверки
     params.delete("hash");
 
-    // data_check_string: пары key=value, отсортированные по key, через \n
     const pairs: string[] = [];
     Array.from(params.entries())
       .sort(([a], [b]) => a.localeCompare(b))
@@ -45,10 +49,10 @@ export function verifyTelegramInitData(
 
     const dataCheckString = pairs.join("\n");
 
-    // ✅ ВАЖНО: key=botToken, message="WebAppData"
+    // ✅ ВАЖНО: key="WebAppData", message=botToken
     const secretKey = crypto
-      .createHmac("sha256", botToken)
-      .update("WebAppData")
+      .createHmac("sha256", "WebAppData")
+      .update(token)
       .digest();
 
     const checkHash = crypto
@@ -83,8 +87,10 @@ export async function isMemberOfChannel(args: {
 }) {
   const { botToken, chatId, userId } = args;
 
+  const token = (botToken ?? "").trim();
+
   const url =
-    `https://api.telegram.org/bot${botToken}/getChatMember` +
+    `https://api.telegram.org/bot${token}/getChatMember` +
     `?chat_id=${encodeURIComponent(String(chatId))}` +
     `&user_id=${encodeURIComponent(String(userId))}`;
 
