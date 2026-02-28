@@ -1,61 +1,33 @@
-// lib/telegram.ts
 import crypto from "crypto";
 
 export function verifyTelegramInitData(initData: string, botToken: string) {
-  // Telegram docs: hash = HMAC_SHA256(data_check_string, secret_key)
-  // secret_key = HMAC_SHA256(bot_token, "WebAppData")
-  const params = new URLSearchParams(initData);
+  if (!initData) return { ok: false as const, reason: "empty_initData" as const };
 
+  const params = new URLSearchParams(initData);
   const hash = params.get("hash");
-  if (!hash) return { ok: false as const, reason: "no_hash" };
+  if (!hash) return { ok: false as const, reason: "no_hash" as const };
 
   params.delete("hash");
 
-  // build data_check_string sorted by key
-  const pairs: string[] = [];
-  Array.from(params.keys())
-    .sort()
-    .forEach((key) => {
-      const val = params.get(key);
-      if (val !== null) pairs.push(`${key}=${val}`);
-    });
+  const dataCheckString = Array.from(params.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([k, v]) => `${k}=${v}`)
+    .join("\n");
 
-  const dataCheckString = pairs.join("\n");
+  // secret_key = HMAC_SHA256("WebAppData", bot_token)
+  const secretKey = crypto.createHmac("sha256", "WebAppData").update(botToken).digest();
 
-  const secretKey = crypto
-    .createHmac("sha256", "WebAppData")
-    .update(botToken)
-    .digest();
-
-  const computed = crypto
+  const computedHash = crypto
     .createHmac("sha256", secretKey)
     .update(dataCheckString)
     .digest("hex");
 
-  if (computed !== hash) return { ok: false as const, reason: "bad_hash" };
+  if (computedHash !== hash) {
+    return { ok: false as const, reason: "bad_hash" as const, computedHash, hash };
+  }
 
-  // user is JSON string
   const userRaw = params.get("user");
   const user = userRaw ? JSON.parse(userRaw) : null;
 
-  return { ok: true as const, user, params };
-}
-
-/**
- * membership check: getChatMember
- * status can be: creator/administrator/member/restricted/left/kicked
- */
-export async function isMemberOfChannel(botToken: string, channelId: number, tgUserId: number) {
-  const url = `https://api.telegram.org/bot${botToken}/getChatMember?chat_id=${channelId}&user_id=${tgUserId}`;
-  const r = await fetch(url, { method: "GET" });
-  const j = await r.json();
-
-  if (!j?.ok) {
-    return { ok: false as const, is_member: false, raw: j };
-  }
-
-  const status: string = j.result?.status;
-  const isMember = ["creator", "administrator", "member", "restricted"].includes(status);
-
-  return { ok: true as const, is_member: isMember, raw: j };
+  return { ok: true as const, user, params: Object.fromEntries(params.entries()) };
 }

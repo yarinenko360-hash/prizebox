@@ -11,7 +11,8 @@ export async function POST(req: Request) {
   try {
     const { initData } = (await req.json()) as Body;
 
-    const botToken = process.env.TELEGRAM_BOT_TOKEN;
+    const botToken = process.env.TELEGRAM_BOT_TOKEN!;
+    const v = verifyTelegramInitData(initData, botToken);           
     if (!botToken) {
       return NextResponse.json(
         { ok: false, error: "No TELEGRAM_BOT_TOKEN" },
